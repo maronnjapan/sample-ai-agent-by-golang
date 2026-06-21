@@ -1,14 +1,15 @@
 package llm
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/llms/openai"
 )
 
 // Provider identifies a known LLM gateway with sensible default endpoints.
@@ -55,13 +56,11 @@ type Config struct {
 	Headers map[string]string
 }
 
-// Client is a minimal, dependency-free chat-completions client.
+// Client wraps a langchaingo LLM and adapts it to the agent's request/response
+// shape. The library handles the OpenAI wire protocol, auth, and transport.
 type Client struct {
-	baseURL string
-	apiKey  string
-	model   string
-	headers map[string]string
-	http    *http.Client
+	llm   *openai.LLM
+	model string
 }
 
 // NewClient builds a Client from cfg, applying provider defaults and
@@ -86,14 +85,33 @@ func NewClient(cfg Config) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: timeout}
 	}
+	// Wrap the transport so any extra headers (e.g. OpenRouter ranking headers)
+	// are attached to every request langchaingo issues.
+	if len(cfg.Headers) > 0 {
+		base := httpClient.Transport
+		if base == nil {
+			base = http.DefaultTransport
+		}
+		clone := *httpClient
+		clone.Transport = &headerTransport{base: base, headers: cfg.Headers}
+		httpClient = &clone
+	}
 
-	return &Client{
-		baseURL: baseURL,
-		apiKey:  cfg.APIKey,
-		model:   cfg.Model,
-		headers: cfg.Headers,
-		http:    httpClient,
-	}, nil
+	opts := []openai.Option{
+		openai.WithToken(cfg.APIKey),
+		openai.WithBaseURL(baseURL),
+		openai.WithHTTPClient(httpClient),
+	}
+	if cfg.Model != "" {
+		opts = append(opts, openai.WithModel(cfg.Model))
+	}
+
+	model, err := openai.New(opts...)
+	if err != nil {
+		return nil, fmt.Errorf("llm: init langchaingo client: %w", err)
+	}
+
+	return &Client{llm: model, model: cfg.Model}, nil
 }
 
 // Model returns the client's default model name.
@@ -102,61 +120,177 @@ func (c *Client) Model() string { return c.model }
 // Chat performs a single chat-completion request and returns the decoded
 // response. When req.Model is empty the client's default model is used.
 func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	if req.Model == "" {
-		req.Model = c.model
+	model := req.Model
+	if model == "" {
+		model = c.model
 	}
-	if req.Model == "" {
+	if model == "" {
 		return nil, fmt.Errorf("llm: no model specified")
 	}
 
-	body, err := json.Marshal(req)
+	messages, err := toLangChainMessages(req.Messages)
 	if err != nil {
-		return nil, fmt.Errorf("llm: marshal request: %w", err)
+		return nil, err
 	}
 
-	url := c.baseURL + "/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("llm: build request: %w", err)
+	callOpts := []llms.CallOption{llms.WithModel(model)}
+	if req.Temperature != nil {
+		callOpts = append(callOpts, llms.WithTemperature(*req.Temperature))
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
-	for k, v := range c.headers {
-		httpReq.Header.Set(k, v)
+	if req.MaxTokens > 0 {
+		callOpts = append(callOpts, llms.WithMaxTokens(req.MaxTokens))
+	}
+	if len(req.Tools) > 0 {
+		tools, err := toLangChainTools(req.Tools)
+		if err != nil {
+			return nil, err
+		}
+		callOpts = append(callOpts, llms.WithTools(tools))
+		if req.ToolChoice != "" {
+			callOpts = append(callOpts, llms.WithToolChoice(req.ToolChoice))
+		}
 	}
 
-	resp, err := c.http.Do(httpReq)
+	resp, err := c.llm.GenerateContent(ctx, messages, callOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("llm: request failed: %w", err)
 	}
-	defer resp.Body.Close()
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("llm: read response: %w", err)
-	}
-
-	var out ChatResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
-		// Fall back to surfacing the raw body so non-JSON errors (e.g. an HTML
-		// gateway page) are not swallowed.
-		return nil, fmt.Errorf("llm: decode response (status %d): %w: %s", resp.StatusCode, err, truncate(string(raw), 500))
-	}
-	if out.Error != nil {
-		return nil, fmt.Errorf("llm: provider error (status %d): %w", resp.StatusCode, out.Error)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("llm: unexpected status %d: %s", resp.StatusCode, truncate(string(raw), 500))
-	}
-	if len(out.Choices) == 0 {
+	if len(resp.Choices) == 0 {
 		return nil, fmt.Errorf("llm: response contained no choices")
 	}
-	return &out, nil
+
+	return fromLangChainResponse(resp), nil
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
+// toLangChainMessages converts the agent's conversation history into the
+// langchaingo message representation, preserving tool calls and tool results so
+// the model sees a well-formed multi-turn history.
+func toLangChainMessages(in []Message) ([]llms.MessageContent, error) {
+	out := make([]llms.MessageContent, 0, len(in))
+	for _, m := range in {
+		switch m.Role {
+		case RoleSystem:
+			out = append(out, llms.TextParts(llms.ChatMessageTypeSystem, m.Content))
+		case RoleUser:
+			out = append(out, llms.TextParts(llms.ChatMessageTypeHuman, m.Content))
+		case RoleAssistant:
+			parts := []llms.ContentPart{}
+			if m.Content != "" {
+				parts = append(parts, llms.TextContent{Text: m.Content})
+			}
+			for _, tc := range m.ToolCalls {
+				parts = append(parts, llms.ToolCall{
+					ID:   tc.ID,
+					Type: tc.Type,
+					FunctionCall: &llms.FunctionCall{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
+				})
+			}
+			out = append(out, llms.MessageContent{Role: llms.ChatMessageTypeAI, Parts: parts})
+		case RoleTool:
+			out = append(out, llms.MessageContent{
+				Role: llms.ChatMessageTypeTool,
+				Parts: []llms.ContentPart{llms.ToolCallResponse{
+					ToolCallID: m.ToolCallID,
+					Name:       m.Name,
+					Content:    m.Content,
+				}},
+			})
+		default:
+			return nil, fmt.Errorf("llm: unknown message role %q", m.Role)
+		}
 	}
-	return s[:n] + "…"
+	return out, nil
+}
+
+// toLangChainTools renders the agent's tool definitions into langchaingo's tool
+// schema. The JSON-Schema parameters are decoded into a generic structure
+// because langchaingo expects an `any`, not raw bytes.
+func toLangChainTools(in []Tool) ([]llms.Tool, error) {
+	out := make([]llms.Tool, 0, len(in))
+	for _, t := range in {
+		var params any
+		if len(t.Function.Parameters) > 0 {
+			if err := json.Unmarshal(t.Function.Parameters, &params); err != nil {
+				return nil, fmt.Errorf("llm: tool %q has invalid parameters schema: %w", t.Function.Name, err)
+			}
+		}
+		out = append(out, llms.Tool{
+			Type: "function",
+			Function: &llms.FunctionDefinition{
+				Name:        t.Function.Name,
+				Description: t.Function.Description,
+				Parameters:  params,
+			},
+		})
+	}
+	return out, nil
+}
+
+// fromLangChainResponse maps langchaingo's first content choice back into the
+// agent's ChatResponse shape, reconstructing any requested tool calls.
+func fromLangChainResponse(resp *llms.ContentResponse) *ChatResponse {
+	choice := resp.Choices[0]
+
+	msg := Message{Role: RoleAssistant, Content: choice.Content}
+	for _, tc := range choice.ToolCalls {
+		call := ToolCall{ID: tc.ID, Type: tc.Type}
+		if call.Type == "" {
+			call.Type = "function"
+		}
+		if tc.FunctionCall != nil {
+			call.Function = FunctionCall{
+				Name:      tc.FunctionCall.Name,
+				Arguments: tc.FunctionCall.Arguments,
+			}
+		}
+		msg.ToolCalls = append(msg.ToolCalls, call)
+	}
+
+	out := &ChatResponse{
+		Choices: []Choice{{Message: msg, FinishReason: choice.StopReason}},
+	}
+	out.Usage = usageFromGenerationInfo(choice.GenerationInfo)
+	return out
+}
+
+// usageFromGenerationInfo extracts token accounting when the provider reports it
+// in the choice's generation info. Missing fields default to zero.
+func usageFromGenerationInfo(info map[string]any) Usage {
+	var u Usage
+	if info == nil {
+		return u
+	}
+	asInt := func(v any) int {
+		switch n := v.(type) {
+		case int:
+			return n
+		case int64:
+			return int(n)
+		case float64:
+			return int(n)
+		}
+		return 0
+	}
+	u.PromptTokens = asInt(info["PromptTokens"])
+	u.CompletionTokens = asInt(info["CompletionTokens"])
+	u.TotalTokens = asInt(info["TotalTokens"])
+	return u
+}
+
+// headerTransport injects a fixed set of headers onto every outgoing request.
+type headerTransport struct {
+	base    http.RoundTripper
+	headers map[string]string
+}
+
+func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Clone to avoid mutating a request the caller may reuse.
+	clone := req.Clone(req.Context())
+	for k, v := range t.headers {
+		clone.Header.Set(k, v)
+	}
+	return t.base.RoundTrip(clone)
 }
