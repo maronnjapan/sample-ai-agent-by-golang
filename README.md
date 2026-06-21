@@ -1,19 +1,20 @@
 # sample-ai-agent-by-golang
 
-A small, dependency-free **AI agent** written in pure Go. It implements a
-classic *reason–act* loop: the agent sends the conversation to a large language
-model, the model can request **tools** (function calling), the agent runs those
-tools and feeds the results back, and the loop repeats until the model produces
-a final answer.
+A small **AI agent** written in Go. It implements a classic *reason–act* loop:
+the agent sends the conversation to a large language model, the model can
+request **tools** (function calling), the agent runs those tools and feeds the
+results back, and the loop repeats until the model produces a final answer.
 
-The LLM client speaks the OpenAI **chat completions** wire format, so the same
-binary works against **OpenAI**, **OpenRouter**, or any other OpenAI-compatible
-gateway (Azure OpenAI, Groq, Together, a local `llama.cpp` server, …) just by
-changing configuration — no code changes required.
+The actual LLM communication is handled by
+[**langchaingo**](https://github.com/tmc/langchaingo), so the same binary works
+against **OpenAI**, **OpenRouter**, or any other OpenAI-compatible gateway
+(Azure OpenAI, Groq, Together, a local `llama.cpp` server, …) just by changing
+configuration — no code changes required.
 
 ## Highlights
 
-- **Pure Go, zero third-party dependencies** — only the standard library.
+- **Library-backed LLM transport** — the OpenAI wire protocol, auth, and
+  request handling are delegated to [langchaingo](https://github.com/tmc/langchaingo).
 - **Provider-agnostic** — switch between OpenAI and OpenRouter via env vars.
 - **Tool / function calling** with a clean `Tool` interface and registry.
 - **Built-in tools**: `calculator` (exact arithmetic), `current_time`
@@ -27,7 +28,7 @@ changing configuration — no code changes required.
 ```
 cmd/agent           CLI: REPL + one-shot mode, tool trace rendering
 internal/config     Env/.env configuration loading & provider defaults
-internal/llm        OpenAI-compatible chat-completions client + types
+internal/llm        langchaingo-backed chat client + agent-facing types
 internal/agent      The reason–act loop (model ⇄ tools) and event stream
 internal/tools      Tool interface, registry, and built-in tools
 ```

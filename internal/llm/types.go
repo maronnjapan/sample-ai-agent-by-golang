@@ -1,7 +1,9 @@
 // Package llm provides a provider-agnostic client for chat-completion style
-// large language model APIs. It speaks the OpenAI "chat completions" wire
-// format, which is also implemented by OpenRouter and many other gateways, so a
-// single client can target multiple providers.
+// large language model APIs. The actual transport and protocol handling is
+// delegated to the langchaingo library (github.com/tmc/langchaingo), so the
+// same client targets OpenAI, OpenRouter, or any other OpenAI-compatible
+// gateway. This package adapts langchaingo's generic LLM interface to the small
+// request/response shape the agent loop works with.
 package llm
 
 import "encoding/json"
@@ -54,7 +56,7 @@ type FunctionDefinition struct {
 	Parameters  json.RawMessage `json:"parameters"`
 }
 
-// ChatRequest is the payload sent to the chat-completions endpoint.
+// ChatRequest is a single chat-completion request.
 type ChatRequest struct {
 	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
@@ -64,14 +66,10 @@ type ChatRequest struct {
 	MaxTokens   int       `json:"max_tokens,omitempty"`
 }
 
-// ChatResponse is the decoded response from the chat-completions endpoint.
+// ChatResponse is the decoded response from a chat-completion request.
 type ChatResponse struct {
-	ID      string   `json:"id"`
-	Model   string   `json:"model"`
 	Choices []Choice `json:"choices"`
 	Usage   Usage    `json:"usage"`
-	// Error is populated when the provider returns an error envelope.
-	Error *APIError `json:"error,omitempty"`
 }
 
 // Choice is a single completion candidate.
@@ -81,26 +79,9 @@ type Choice struct {
 	FinishReason string  `json:"finish_reason"`
 }
 
-// Usage reports token accounting for a request.
+// Usage reports token accounting for a request, when the provider supplies it.
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
-}
-
-// APIError is the error envelope returned by OpenAI-compatible providers.
-type APIError struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Code    any    `json:"code"`
-}
-
-func (e *APIError) Error() string {
-	if e == nil {
-		return ""
-	}
-	if e.Type != "" {
-		return e.Type + ": " + e.Message
-	}
-	return e.Message
 }
