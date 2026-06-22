@@ -18,7 +18,11 @@ configuration — no code changes required.
 - **Provider-agnostic** — switch between OpenAI and OpenRouter via env vars.
 - **Tool / function calling** with a clean `Tool` interface and registry.
 - **Built-in tools**: `calculator` (exact arithmetic), `current_time`
-  (timezone-aware clock), `http_get` (read-only web fetch).
+  (timezone-aware clock), `http_get` (read-only web fetch),
+  `knowledge_search` (retrieval over a local knowledge base).
+- **Knowledge base (RAG)** — drop Markdown into `knowledge/` and the agent
+  retrieves relevant passages (chunked with langchaingo's `textsplitter`) and
+  grounds its answers in them, citing the source file.
 - **Interactive REPL** and **one-shot** modes.
 - **Well tested** — agent loop is exercised against a mock provider; tools and
   config have unit tests.
@@ -31,6 +35,8 @@ internal/config     Env/.env configuration loading & provider defaults
 internal/llm        langchaingo-backed chat client + agent-facing types
 internal/agent      The reason–act loop (model ⇄ tools) and event stream
 internal/tools      Tool interface, registry, and built-in tools
+internal/knowledge  Knowledge base: load, chunk (textsplitter) and search
+knowledge/          Markdown knowledge the agent retrieves from (RAG)
 ```
 
 The agent depends only on two abstractions — an `*llm.Client` and a
@@ -47,7 +53,7 @@ The agent depends only on two abstractions — an `*llm.Client` and a
       │ execute requested tools
       ▼
  ┌────────────┐
- │  Registry  │  calculator / current_time / http_get
+ │  Registry  │  calculator / current_time / http_get / knowledge_search
  └────────────┘
       │ results fed back as tool messages
       └──────────────► loop until final answer
@@ -119,8 +125,33 @@ show tool results.
 | `AGENT_TEMPERATURE`   | `0.7`                         | Sampling temperature                                   |
 | `AGENT_MAX_STEPS`     | `10`                          | Max model⇄tool round-trips per turn (loop guard)       |
 | `AGENT_SYSTEM_PROMPT` | built-in                      | Override the system prompt                             |
+| `AGENT_KNOWLEDGE_DIR` | `knowledge`                   | Directory of Markdown/text loaded into the knowledge base |
 | `OPENROUTER_REFERER`  | —                             | Optional OpenRouter `HTTP-Referer` ranking header      |
 | `OPENROUTER_TITLE`    | —                             | Optional OpenRouter `X-Title` ranking header           |
+
+## Knowledge base (RAG)
+
+The agent can ground its answers in a local knowledge base. At startup it loads
+every `.md`, `.markdown`, and `.txt` file under `knowledge/` (configurable with
+`AGENT_KNOWLEDGE_DIR`), splits them into chunks with langchaingo's
+`textsplitter`, and keeps them in memory. Those chunks are exposed through the
+`knowledge_search` tool: when the model needs project- or domain-specific
+information it searches the base, and the system prompt instructs it to answer
+from the retrieved passages and cite their source file.
+
+To add knowledge, just drop Markdown files into `knowledge/`:
+
+```
+knowledge/
+  agent-overview.md
+  configuration.md
+  your-topic.md
+```
+
+Retrieval is a lightweight keyword (term-frequency) match, so it needs no
+external vector database or embeddings API and stays fully self-contained and
+testable. If the directory is missing or empty, the `knowledge_search` tool is
+simply not registered and the agent behaves as before.
 
 ## Adding a tool
 

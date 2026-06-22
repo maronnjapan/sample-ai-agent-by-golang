@@ -30,6 +30,9 @@ type Config struct {
 	MaxSteps int
 	// SystemPrompt はカスタムシステムプロンプトです。空の場合はエージェントのデフォルトが使用されます。
 	SystemPrompt string
+	// KnowledgeDir はナレッジ（Markdown 等）を読み込むディレクトリです（デフォルト: "knowledge"）。
+	// このディレクトリ配下のファイルが knowledge_search ツールの検索対象になります。
+	KnowledgeDir string
 	// ExtraHeaders はすべてのLLMリクエストに付加される追加ヘッダーです。
 	// OpenRouter のランキングヘッダー等に使用します。
 	ExtraHeaders map[string]string
@@ -48,6 +51,7 @@ type Config struct {
 //	AGENT_TEMPERATURE   サンプリング温度 (デフォルト: 0.7)
 //	AGENT_MAX_STEPS     1ターンあたりの最大ステップ数 (デフォルト: 10)
 //	AGENT_SYSTEM_PROMPT カスタムシステムプロンプト
+//	AGENT_KNOWLEDGE_DIR ナレッジを読み込むディレクトリ (デフォルト: "knowledge")
 func Load() (*Config, error) {
 	// .env ファイルを読み込みます（存在しない場合は無視）。
 	// .env の値はすでに設定されている環境変数を上書きしません。
@@ -61,8 +65,9 @@ func Load() (*Config, error) {
 		BaseURL:      os.Getenv("AGENT_BASE_URL"),
 		Model:        os.Getenv("AGENT_MODEL"),
 		SystemPrompt: os.Getenv("AGENT_SYSTEM_PROMPT"),
-		Temperature:  0.7,  // デフォルト温度: バランスの取れた創造性と一貫性
-		MaxSteps:     10,   // デフォルト最大ステップ: ツール連鎖のループを防ぐ安全弁
+		KnowledgeDir: getenv("AGENT_KNOWLEDGE_DIR", "knowledge"),
+		Temperature:  0.7, // デフォルト温度: バランスの取れた創造性と一貫性
+		MaxSteps:     10,  // デフォルト最大ステップ: ツール連鎖のループを防ぐ安全弁
 		ExtraHeaders: map[string]string{},
 	}
 
