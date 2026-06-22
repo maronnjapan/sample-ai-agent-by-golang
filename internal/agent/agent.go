@@ -21,7 +21,10 @@ import (
 const DefaultSystemPrompt = "You are a helpful AI assistant with access to tools. " +
 	"When a tool can produce a more accurate answer than your own reasoning " +
 	"(for example arithmetic, the current time, or fetching a web page), prefer " +
-	"calling the tool. Think step by step and give concise, correct answers."
+	"calling the tool. If a knowledge_search tool is available, consult the " +
+	"knowledge base for questions about this project or topics it may document, " +
+	"and ground your answer in the retrieved passages, citing their source. " +
+	"Think step by step and give concise, correct answers."
 
 // Event は Run 中に発生した出来事を記述します。
 // コールバックを通じて呼び出し元（CLI・テスト・UI）へ配信されることで、

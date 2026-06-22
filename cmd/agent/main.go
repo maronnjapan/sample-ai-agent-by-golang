@@ -20,6 +20,7 @@ import (
 
 	"github.com/maronnjapan/sample-ai-agent-by-golang/internal/agent"
 	"github.com/maronnjapan/sample-ai-agent-by-golang/internal/config"
+	"github.com/maronnjapan/sample-ai-agent-by-golang/internal/knowledge"
 	"github.com/maronnjapan/sample-ai-agent-by-golang/internal/llm"
 	"github.com/maronnjapan/sample-ai-agent-by-golang/internal/tools"
 )
@@ -64,8 +65,15 @@ func run(prompt string, quiet, verbose bool) error {
 		return err
 	}
 
+	// ナレッジベースを読み込みます（ディレクトリが無い・空の場合は何も登録しません）。
+	// 読み込めた場合は knowledge_search ツールとして検索を提供します。
+	store, err := knowledge.Load(cfg.KnowledgeDir)
+	if err != nil {
+		return err
+	}
+
 	// 組み込みツールを登録します
-	registry := buildToolRegistry()
+	registry := buildToolRegistry(store)
 
 	// エージェントのオプションを構築します
 	opts := []agent.Option{
@@ -105,7 +113,7 @@ func run(prompt string, quiet, verbose bool) error {
 	}
 
 	// インタラクティブ REPL モードを開始します
-	return repl(ctx, ag, obs, cfg, registry)
+	return repl(ctx, ag, obs, cfg, registry, store)
 }
 
 // buildToolRegistry は組み込みツールを登録します。
@@ -113,21 +121,33 @@ func run(prompt string, quiet, verbose bool) error {
 //   - Calculator: 算術式評価（正確な数値計算）
 //   - Clock: 現在の日時取得（タイムゾーン対応）
 //   - HTTPGet: HTTPリクエスト実行（読み取り専用・サイズ制限あり）
-func buildToolRegistry() *tools.Registry {
+//   - KnowledgeSearch: ナレッジベース検索（store にナレッジがある場合のみ登録）
+//
+// store にナレッジが1件も無い場合は knowledge_search を登録しないため、
+// ナレッジを用意していない利用者の動作は従来どおりです。
+func buildToolRegistry(store *knowledge.Store) *tools.Registry {
 	registry := tools.NewRegistry()
 	registry.MustRegister(tools.Calculator{})
 	registry.MustRegister(tools.Clock{})
 	registry.MustRegister(tools.HTTPGet{})
+	if store != nil && store.Len() > 0 {
+		registry.MustRegister(tools.KnowledgeSearch{Store: store})
+	}
 	return registry
 }
 
 // repl はインタラクティブループを実行します。
 // 会話履歴はターンをまたいで保持されます。
 // コマンド: /reset（会話リセット）、/exit または /quit（終了）
-func repl(ctx context.Context, ag *agent.Agent, obs agent.Observer, cfg *config.Config, registry *tools.Registry) error {
+func repl(ctx context.Context, ag *agent.Agent, obs agent.Observer, cfg *config.Config, registry *tools.Registry, store *knowledge.Store) error {
 	// 起動情報: プロバイダー・モデル・利用可能なツールを表示します
 	fmt.Printf("AI Agent (provider=%s model=%s, tools: %s)\n",
 		cfg.Provider, cfg.Model, strings.Join(registry.Names(), ", "))
+	// ナレッジを読み込めた場合は、件数とソース一覧を表示します
+	if store != nil && store.Len() > 0 {
+		fmt.Printf("Knowledge: %d chunk(s) from %s\n",
+			store.Len(), strings.Join(store.Sources(), ", "))
+	}
 	fmt.Println("Type your message and press Enter. Commands: /reset, /exit")
 
 	// 会話履歴を初期化します（システムプロンプトが自動的に先頭に追加されます）
